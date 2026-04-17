@@ -12,7 +12,6 @@ import org.springframework.core.env.Environment;
 @SpringBootApplication
 public class MallAdminApplication {
     public static void main(String[] args) {
-        SpringApplication.run(MallAdminApplication.class, args);
         ConfigurableApplicationContext applicationContext = SpringApplication.run(MallAdminApplication.class, args);
         Environment env = applicationContext.getEnvironment();
         String port = env.getProperty("server.port");
