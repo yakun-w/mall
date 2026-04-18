@@ -1,4 +1,5 @@
-### 后台用户登录
+### 第一步：登录获取 Token
+# @name login
 POST http://localhost:8080/demo/login
 Content-Type: application/json
 
@@ -8,6 +9,11 @@ Content-Type: application/json
 }
 
 > {%
-    // 将返回的 token 自动保存到全局变量，方便后续接口使用
-    client.global.set("auth_token", response.body.data.tokenHead + ' ' + response.body.data.token);
+    if (response.status === 200) {
+        // 【核心修改】这里要用 response.body.data，只取那一长串 Token
+        client.global.set("auth_token", response.body.data);
+        client.log("Token 抓取成功！");
+    } else {
+        client.log("登录失败：" + response.status);
+    }
 %}

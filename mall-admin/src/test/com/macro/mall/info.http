@@ -1,0 +1,6 @@
+### 后台用户登录
+### 第二步：请求 /info 接口（携带 Token）
+### 请求用户信息
+GET http://localhost:8080/demo/info
+Authorization: {{auth_token}}
+Accept: application/json
