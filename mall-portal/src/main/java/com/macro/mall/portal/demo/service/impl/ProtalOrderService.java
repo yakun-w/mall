@@ -4,8 +4,12 @@ import com.macro.mall.portal.demo.dto.OrderResult;
 import com.macro.mall.portal.demo.entity.OmsOrder;
 import com.macro.mall.portal.demo.entity.OmsOrderItem;
 import com.macro.mall.portal.demo.entity.OmsOrderStatus;
+import com.macro.mall.portal.demo.mapper.OrderItemMapper;
+import com.macro.mall.portal.demo.mapper.OrderMapper;
+import com.macro.mall.portal.demo.mapper.ProductMapper;
 import com.macro.mall.portal.demo.service.IProtalOrderService;
 import com.macro.mall.portal.domain.OrderParam;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,14 +18,24 @@ import java.util.*;
 
 @Service
 public class ProtalOrderService implements IProtalOrderService {
+
+    @Autowired
+    private OrderMapper orderMapper;
+
+    @Autowired
+    private OrderItemMapper orderItemMapper;
+
+    @Autowired
+    private ProductMapper productMapper;
+
     @Override
     public OrderResult getOrder(OrderParam orderParam) {
 
-
         // 1. 假装有商品
         String productName = "iphone";
-        BigDecimal price = new BigDecimal("800");
+        Long productId = 1L;
         int quantity = 2;
+        BigDecimal price = new BigDecimal("800");
 
         // 2. 判断库存
         reduceStock(quantity);
