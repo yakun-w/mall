@@ -22,7 +22,7 @@ public class OrderRabbitMQConfig {
         Map<String,Object> args = new HashMap<>();
         args.put("x-dead-letter-exchange","order.exchange");
         args.put("x-dead-letter-routing-key","order.release");
-        args.put("x-message-ttl", 30 * 60 * 1000); // 30分钟
+        args.put("x-message-ttl", 5 * 1000); // 30分钟
 
         return new Queue(ORDER_DELAY_QUEUE,true,false,false,args);
     }

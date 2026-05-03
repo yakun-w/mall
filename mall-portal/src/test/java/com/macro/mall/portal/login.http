@@ -1,0 +1,22 @@
+### 1. 模拟下单（生成订单并发送延迟消息）
+POST http://localhost:8080/order/generateOrder
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "memberId": 1,
+  "couponId": null,
+  "addressId": 1,
+  "payType": 0
+}
+
+> {%
+    // 将返回的 orderSn 存入全局变量，方便后续查询
+    client.global.set("orderSn", response.body.data.order.orderSn);
+%}
+
+### 2. 立即查询订单状态（此时应该是 0: 待支付）
+GET http://localhost:8080/order/detail/{{orderSn}}
+
+### 3. 等待 5 秒后，再次手动查询（此时应该自动变成 4: 已关闭）
+GET http://localhost:8080/order/detail/{{orderSn}}
