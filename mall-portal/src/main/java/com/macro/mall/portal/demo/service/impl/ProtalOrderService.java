@@ -9,6 +9,7 @@ import com.macro.mall.portal.demo.mapper.OrderMapper;
 import com.macro.mall.portal.demo.mapper.ProductMapper;
 import com.macro.mall.portal.demo.service.IProtalOrderService;
 import com.macro.mall.portal.domain.OrderParam;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,6 +29,9 @@ public class ProtalOrderService implements IProtalOrderService {
     @Autowired
     private ProductMapper productMapper;
 
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+
     @Override
     public OrderResult getOrder(OrderParam orderParam) {
 
@@ -38,53 +42,53 @@ public class ProtalOrderService implements IProtalOrderService {
         BigDecimal price = new BigDecimal("800");
 
         // 2. 判断库存
-        reduceStock(quantity);
+        int count = productMapper.reduceStock(productId, quantity);
+
+        if(count == 0){
+            throw new RuntimeException("库存不足");
+        }
+
 
         // 3. 计算价格
         BigDecimal totalAmount =
                 price.multiply(new BigDecimal(quantity));
-        // 假装优惠100
-        BigDecimal discount = new BigDecimal("100");
 
-        //运费
-        BigDecimal freight = new BigDecimal("10");
-        //优惠券
-        BigDecimal couponAmount = new BigDecimal("50");
-
-        BigDecimal payAmount = totalAmount;
-
-        payAmount = payAmount.subtract(discount);
-        payAmount = payAmount.subtract(couponAmount);
-        payAmount = payAmount.add(freight);
+        BigDecimal payAmount =
+                totalAmount.subtract(new BigDecimal("100"))
+                        .subtract(new BigDecimal("50"))
+                        .add(new BigDecimal("10"));
 
         // 4. 创建订单
         // 1. 创建订单主表对象 (Order)
         OmsOrder order = new OmsOrder();
+        order.setOrderSn(UUID.randomUUID().toString());
         order.setTotalAmount(totalAmount);
         order.setPayAmount(payAmount);
-        order.setStatus(OmsOrderStatus.UNPAID); // 待付款状态
-        order.setOrderSn(UUID.randomUUID().toString());
-        order.setNote(quantity);
+        order.setStatus(0);
+
+        orderMapper.insert(order);
 
 
         // 2. 创建订单详情对象 (OrderItem)
         OmsOrderItem item = new OmsOrderItem();
-        item.setProductName(productName);
+        item.setOrderId(order.getId());
+        item.setProductName("iphone");
         item.setProductPrice(price);
         item.setProductQuantity(quantity);
-        // ... 其他快照信息 ...
 
-        // 3. 把商品放入 List (因为一个订单可能有多个商品)
-        List<OmsOrderItem> itemList = new ArrayList<>();
-        itemList.add(item);
+        orderItemMapper.insert(item);
 
         // 4. 封装成最终结果 (OrderResult)
         OrderResult result = new OrderResult();
         result.setOrder(order);
-        result.setOrderItems(itemList);
+        result.setOrderItems(Arrays.asList(item));
 
-        orderDB.put(order.getOrderSn(), order);
-        orderItemDB.put(order.getOrderSn(), itemList);
+        // 🔥 发送延迟消息
+        rabbitTemplate.convertAndSend(
+                "order.exchange",
+                "order.create",
+                order.getOrderSn()
+        );
 
         return result;
     }
@@ -92,7 +96,7 @@ public class ProtalOrderService implements IProtalOrderService {
     @Override
     public void payOrder(String orderSn){
 
-        OmsOrder order = orderDB.get(orderSn);
+        OmsOrder order = orderMapper.getBySn(orderSn);
 
         if(order == null){
             throw new RuntimeException("订单不存在");
@@ -108,33 +112,32 @@ public class ProtalOrderService implements IProtalOrderService {
     @Override
     public void cancelOrder(String orderSn){
 
-        OmsOrder order = orderDB.get(orderSn);
+        OmsOrder order = orderMapper.getBySn(orderSn);
 
         if(order == null){
             throw new RuntimeException("订单不存在");
         }
 
         if(order.getStatus() != OmsOrderStatus.UNPAID){
-            throw new RuntimeException("只有待支付才能取消");
+            return;
         }
 
-        order.setStatus(OmsOrderStatus.CLOSED);
+        // 改状态
+        orderMapper.updateStatus(orderSn, 2);
 
-        // 👉 从订单项拿数量
-        List<OmsOrderItem> items = orderItemDB.get(orderSn);
+        // 查订单项
+        List<OmsOrderItem> items = orderItemMapper.listByOrderId(order.getId());
 
-        int totalQuantity = 0;
+        // 🔥 回滚库存
         for (OmsOrderItem item : items) {
-            totalQuantity += item.getProductQuantity();
+            productMapper.addStock(1L, item.getProductQuantity());
         }
-
-        releaseStock(totalQuantity);
     }
 
     @Override
     public OrderResult getOrderBySn(String orderSn){
 
-        OmsOrder order = orderDB.get(orderSn);
+        OmsOrder order = orderMapper.getBySn(orderSn);
 
         if(order == null){
             throw new RuntimeException("订单不存在");
@@ -169,6 +172,6 @@ public class ProtalOrderService implements IProtalOrderService {
     //库存
     private int stock = 10;
 
-    private Map<String, OmsOrder> orderDB = new HashMap<>();
+
     private Map<String, List<OmsOrderItem>> orderItemDB = new HashMap<>();
 }
