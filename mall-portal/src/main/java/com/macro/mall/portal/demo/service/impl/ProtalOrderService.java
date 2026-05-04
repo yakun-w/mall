@@ -95,42 +95,36 @@ public class ProtalOrderService implements IProtalOrderService {
 
     @Override
     public void payOrder(String orderSn){
+        //支付
+        int updated = orderMapper.payIfUnpaid(orderSn);
 
-        OmsOrder order = orderMapper.getBySn(orderSn);
-
-        if(order == null){
-            throw new RuntimeException("订单不存在");
-        }
-
-        if(order.getStatus() != OmsOrderStatus.UNPAID){
+        if(updated == 0){
             throw new RuntimeException("订单状态异常");
         }
-
-        order.setStatus(OmsOrderStatus.PAID);
     }
 
     @Override
+    @Transactional
     public void cancelOrder(String orderSn){
+        //改状态
+        int updated = orderMapper.cancelIfUnpaid(orderSn);
 
-        OmsOrder order = orderMapper.getBySn(orderSn);
-
-        if(order == null){
-            throw new RuntimeException("订单不存在");
-        }
-
-        if(order.getStatus() != OmsOrderStatus.UNPAID){
+        if(updated == 0){
             return;
         }
+        //订单号
+        OmsOrder order = orderMapper.getBySn(orderSn);
+        if (order == null) {
+            return; // 理论上由于上面更新成功，这里一定能查到
+        }
 
-        // 改状态
-        orderMapper.updateStatus(orderSn, 2);
 
         // 查订单项
         List<OmsOrderItem> items = orderItemMapper.listByOrderId(order.getId());
 
         // 🔥 回滚库存
         for (OmsOrderItem item : items) {
-            productMapper.addStock(1L, item.getProductQuantity());
+            productMapper.addStock(item.getProductId(), item.getProductQuantity());
         }
     }
 

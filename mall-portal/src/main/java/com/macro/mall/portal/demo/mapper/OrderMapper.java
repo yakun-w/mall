@@ -16,4 +16,10 @@ public interface OrderMapper {
 
     @Update("UPDATE oms_order SET status = #{status} WHERE order_sn = #{orderSn}")
     int updateStatus(@Param("orderSn") String orderSn,@Param("status") int status);
+
+    @Update("UPDATE oms_order SET status = 2 WHERE order_sn = #{orderSn} AND status = 0")
+    int cancelIfUnpaid(String orderSn);
+
+    @Update("UPDATE oms_order SET status = 1 WHERE order_sn = #{orderSn} AND status = 0")
+    int payIfUnpaid(String orderSn);
 }
