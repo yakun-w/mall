@@ -1,0 +1,4 @@
+### 会员注册测试
+POST http://localhost:8085/sso/register
+    ?username=test001&password=123456&telephone=13800138000
+    &authCode=123456

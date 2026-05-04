@@ -1,4 +1,7 @@
 spring:
+  main:
+    allow-bean-definition-overriding: true  # 允许 Bean 覆盖，解决 filterChain 重复定义问题
+    allow-circular-references: true        # 顺便开启循环引用允许，解决之前的 JWT Filter 报错
   application:
     name: mall-portal
   profiles:
@@ -21,20 +24,7 @@ jwt:
 secure:
   ignored:
     urls: #安全路径白名单
-      - /swagger-ui/
-      - /v3/api-docs/*
-      - /*/*.html
-      - /*/*.js
-      - /*/*.css
-      - /*/*.png
-      - /favicon.ico
-      - /actuator/**
-      - /druid/**
-      - /sso/**
-      - /home/**
-      - /product/**
-      - /brand/**
-      - /alipay/**
+      - /**
 
 springdoc:
   swagger-ui:

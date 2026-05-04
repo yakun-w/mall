@@ -1,0 +1,19 @@
+### 1. 发起下单请求 (测试 RabbitMQ 延迟关单)
+POST http://localhost:8085/demoOrder/generateOrder
+Content-Type: application/json
+
+{
+  "memberReceiveAddressId": 1,
+  "couponId": [1],
+  "useIntegration": 0,
+  "payType": 0,
+  "cartIds": [1, 2, 3]
+}
+
+> {%
+    // 逻辑检查：确保返回码是 200 再设置变量
+    if (response.status === 200 && response.body.data) {
+        client.global.set("orderSn", response.body.data.order.orderSn);
+        client.log("订单号已存入全局变量: " + response.body.data.order.orderSn);
+    }
+%}
