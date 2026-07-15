@@ -1,10 +1,12 @@
 package com.macro.mall.portal.demo.service.impl;
 
 import com.macro.mall.common.api.CommonResult;
-import com.macro.mall.model.UmsMember;
+import com.macro.mall.model.OmsCartItem1;
+import com.macro.mall.model.OmsCartItem1Example;
 import com.macro.mall.portal.demo.dto.OrderResult;
 import com.macro.mall.portal.demo.entity.OmsOrder;
 import com.macro.mall.portal.demo.entity.OmsOrderItem;
+import com.macro.mall.portal.demo.mapper.OmsCartItem1Mapper;
 import com.macro.mall.portal.demo.mapper.OrderItemMapper;
 import com.macro.mall.portal.demo.mapper.OrderMapper;
 import com.macro.mall.portal.demo.mapper.ProductMapper;
@@ -36,7 +38,7 @@ public class ProtalOrderService implements IProtalOrderService {
     private ProductMapper productMapper;
 
     @Autowired
-    private
+    private OmsCartItem1Mapper cartItem1Mapper;
 
     @Autowired
     private RabbitTemplate rabbitTemplate;
@@ -64,70 +66,64 @@ public class ProtalOrderService implements IProtalOrderService {
 
     @Override
     @Transactional
-    public OrderResult getOrder(OrderParam orderParam) {
+    public OrderResult getOrder(OrderParam orderParam){
 
-        // 1. 从入参里拿到用户勾选的购物车零件 ID 列表
+        // 1. 🔍 从入参里拿到用户勾选的购物车 ID 列表并校验
         List<Long> cartIds = orderParam.getCartIds();
         if (CollectionUtils.isEmpty(cartIds)) {
             throw new RuntimeException("请选择要结算的商品");
         }
 
-        // 2. 🔌 物理替换：去数据库查出这些购物车记录（里面包含了商品ID、选购数量、价格、名字）
-        // 实际项目中通常会写一个批量查询，这里用伪代码展示核心逻辑：SELECT * FROM oms_cart_item WHERE id IN (cartIds)
-        List<OmsCartItem> cartItemList = orderItemMapper.selectByCartIds(cartIds);
+        // 2. 🔌 去数据库查出这些真实的购物车记录
+        OmsCartItem1Example example = new OmsCartItem1Example();
+        example.createCriteria().andIdIn(cartIds);
+        List<OmsCartItem1> cartItemList = cartItem1Mapper.selectByExample(example);
+        if (CollectionUtils.isEmpty(cartItemList)) {
+            throw new RuntimeException("未找到对应的购物车商品数据");
+        }
 
-        // 3. 计算价格的物理初始化
-        BigDecimal totalAmount = BigDecimal.ZERO;
+        // 3. 🪙 价格与零件容器初始化
+        BigDecimal totalAmount = BigDecimal.ZERO;                  // 订单总金额
+        List<OmsOrderItem> orderItemList = new ArrayList<>();     // 订单详情零件包
 
-        // 4. 创建订单主表对象 (OmsOrder)
-        OmsOrder order = new OmsOrder();
-        order.setOrderSn(UUID.randomUUID().toString());
-        order.setStatus(0); // 待支付
-
-        // 5. 准备一个容器，用来装所有的订单详情零件
-        List<OmsOrderItem> orderItemList = new ArrayList<>();
-
-        // 🔥 核心循环：把假数据完全拔掉，遍历真实的购物车商品列表
-        for (OmsCartItem cartItem : cartItemList) {
+        // 4. 🌀 核心循环：遍历真实的购物车商品列表，处理库存与详情组装
+        for (OmsCartItem1 cartItem : cartItemList) {
             Long productId = cartItem.getProductId();
             int quantity = cartItem.getQuantity();
-            BigDecimal price = cartItem.getPrice(); // 购物车里的加入时价格（或者去商品表查最新价）
+            BigDecimal price = cartItem.getPrice(); // 以购物车记录的价格为准（后续可以扩展去 PMS 查最新价）
 
-            // 步骤一：多重防线扣减库存（每种商品都要扣）
+            // 🛡️ 步骤一：多重防线扣减库存（Redis + DB 补救）
             this.reduceStockLogic(productId, quantity);
 
-            // 步骤二：累加总价格
+            // 📈 步骤二：累加总价格
             BigDecimal itemTotalAmount = price.multiply(new BigDecimal(quantity));
             totalAmount = totalAmount.add(itemTotalAmount);
 
-            // 步骤三：组装每一个订单详情零件 (OmsOrderItem)
+            // 🛠️ 步骤三：组装每一个订单详情零件 (OmsOrderItem)
             OmsOrderItem item = new OmsOrderItem();
-            // 注意：此时 order.getId() 还没落库，如果用的是数据库自增ID，可以在后面的 saveOrderToDb 里统一绑定
-            item.setProductName(cartItem.getProductName()); // 👈 真实的商品名字
-            item.setProductPrice(price);                    // 👈 真实的商品价格
-            item.setProductQuantity(quantity);              // 👈 真实的商品数量
             item.setProductId(productId);
-
+            item.setProductName(cartItem.getProductName());
+            item.setProductPrice(price);
+            item.setProductQuantity(quantity);
+            // 注意：此时 order 还没落库，没有主键 ID。我们先把它丢进集合，后面统一绑定。
             orderItemList.add(item);
         }
 
-        // 步骤一：多重防线扣减库存
-        this.reduceStockLogic(productId, quantity);
+        // 5. 💰 循环结束后，精细计算最终实际支付金额（扣除优惠券、积分等）
+        BigDecimal payAmount = this.calculatePayAmount(totalAmount, orderParam);
 
-        // 步骤二：精细计算各项价格
-        BigDecimal totalAmount = price.multiply(new BigDecimal(quantity));
-        BigDecimal payAmount = this.calculatePayAmount(totalAmount);
+        // 6. 🏗️ 组装并持久化订单实体
+        // 6.1 创建订单主表对象 (OmsOrder)
+        OmsOrder order = this.buildOrderEntity(totalAmount, payAmount, orderParam);
 
-        // 步骤三：组装并持久化订单实体
-        OmsOrder order = this.buildOrderEntity(totalAmount, payAmount);
-        OmsOrderItem item = this.buildOrderItemEntity(order.getId(), price, quantity);
-        this.saveOrderToDb(order, item);
+        // 6.2 将主表和子表集合一并存入数据库（saveOrderToDb 内部会先保存 order 拿到自增 id，然后赋给每个 item 并保存）
+        this.saveOrderToDb(order, orderItemList);
 
-        // 步骤四：发射延迟导弹（关单消息）
+        // 7. 🚀 发射延迟导弹（向 RabbitMQ 发送延迟关单消息，防止用户占座不付款）
         this.sendDelayMessage(order.getOrderSn());
 
-        // 步骤五：打包返回结果
-        return this.packageOrderResult(order, item);
+        // 8. 🎁 打包返回结果给前端
+        return this.packageOrderResult(order, orderItemList);
     }
 
     @Override
@@ -263,7 +259,8 @@ public class ProtalOrderService implements IProtalOrderService {
     }
 
     //价格计算
-    private BigDecimal calculatePayAmount(BigDecimal totalAmount) {
+    private BigDecimal calculatePayAmount(BigDecimal totalAmount,OrderParam orderParam) {
+        BigDecimal payAmount = totalAmount;
         // 减去优惠券 100，减去积分 50，加上运费 10
         return totalAmount.subtract(new BigDecimal("100"))
                 .subtract(new BigDecimal("50"))
@@ -271,7 +268,7 @@ public class ProtalOrderService implements IProtalOrderService {
     }
 
 
-    private OmsOrder buildOrderEntity(BigDecimal totalAmount, BigDecimal payAmount) {
+    private OmsOrder buildOrderEntity(BigDecimal totalAmount, BigDecimal payAmount, OrderParam orderParam) {
         OmsOrder order = new OmsOrder();
         order.setOrderSn(UUID.randomUUID().toString());
         order.setTotalAmount(totalAmount);
@@ -290,9 +287,16 @@ public class ProtalOrderService implements IProtalOrderService {
     }
 
     //数据库持久化
-    private void saveOrderToDb(OmsOrder order, OmsOrderItem item) {
+    private void saveOrderToDb(OmsOrder order, List<OmsOrderItem> orderItemList) {
+        // 1. 先保存主表（MyBatis 开启 useGeneratedKeys="true" keyProperty="id" 后，会自动回填自增 ID 到 order 对象中）
         orderMapper.insert(order);
-        orderItemMapper.insert(item);
+
+        // 2. 拿着热乎的自增订单 ID，物理绑定到每一个商品详情零件上
+        for (OmsOrderItem item : orderItemList) {
+            item.setOrderId(order.getId());
+            item.setOrderSn(order.getOrderSn());
+            orderItemMapper.insert(item); // 逐条插入或改写成 MyBatis 批量插入 batchInsert
+        }
     }
 
     //MQ 消息车间
