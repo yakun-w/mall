@@ -15,4 +15,17 @@ public interface OrderItemMapper {
 
     @Select("SELECT * FROM oms_order_item WHERE order_id = #{orderId}")
     List<OmsOrderItem> listByOrderId(Long orderId);
+
+    /**
+     * 根据购物车ID列表查询商品信息
+     * @param cartIds 购物车ID集合
+     */
+    @Select("<script>" +
+            "SELECT * FROM oms_cart_item " +
+            "WHERE id IN " +
+            "<foreach collection='cartIds' item='id' open='(' separator=',' close=')'>" +
+            "#{id}" +
+            "</foreach>" +
+            "</script>")
+    List<OmsOrderItem> selectByCartIds(@Param("cartIds") List<Long> cartIds);
 }

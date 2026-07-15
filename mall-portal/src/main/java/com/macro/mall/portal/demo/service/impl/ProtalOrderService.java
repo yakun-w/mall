@@ -17,6 +17,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
 import java.util.*;
@@ -33,6 +34,9 @@ public class ProtalOrderService implements IProtalOrderService {
 
     @Autowired
     private ProductMapper productMapper;
+
+    @Autowired
+    private
 
     @Autowired
     private RabbitTemplate rabbitTemplate;
@@ -62,12 +66,50 @@ public class ProtalOrderService implements IProtalOrderService {
     @Transactional
     public OrderResult getOrder(OrderParam orderParam) {
 
-        // 1. 假装有商品数据
-        Long productId = 1L;
-        int quantity = 2;
-        BigDecimal price = new BigDecimal("800");
+        // 1. 从入参里拿到用户勾选的购物车零件 ID 列表
+        List<Long> cartIds = orderParam.getCartIds();
+        if (CollectionUtils.isEmpty(cartIds)) {
+            throw new RuntimeException("请选择要结算的商品");
+        }
 
-        // 🔥 核心流程编排：只调用，不看具体实现细节
+        // 2. 🔌 物理替换：去数据库查出这些购物车记录（里面包含了商品ID、选购数量、价格、名字）
+        // 实际项目中通常会写一个批量查询，这里用伪代码展示核心逻辑：SELECT * FROM oms_cart_item WHERE id IN (cartIds)
+        List<OmsCartItem> cartItemList = orderItemMapper.selectByCartIds(cartIds);
+
+        // 3. 计算价格的物理初始化
+        BigDecimal totalAmount = BigDecimal.ZERO;
+
+        // 4. 创建订单主表对象 (OmsOrder)
+        OmsOrder order = new OmsOrder();
+        order.setOrderSn(UUID.randomUUID().toString());
+        order.setStatus(0); // 待支付
+
+        // 5. 准备一个容器，用来装所有的订单详情零件
+        List<OmsOrderItem> orderItemList = new ArrayList<>();
+
+        // 🔥 核心循环：把假数据完全拔掉，遍历真实的购物车商品列表
+        for (OmsCartItem cartItem : cartItemList) {
+            Long productId = cartItem.getProductId();
+            int quantity = cartItem.getQuantity();
+            BigDecimal price = cartItem.getPrice(); // 购物车里的加入时价格（或者去商品表查最新价）
+
+            // 步骤一：多重防线扣减库存（每种商品都要扣）
+            this.reduceStockLogic(productId, quantity);
+
+            // 步骤二：累加总价格
+            BigDecimal itemTotalAmount = price.multiply(new BigDecimal(quantity));
+            totalAmount = totalAmount.add(itemTotalAmount);
+
+            // 步骤三：组装每一个订单详情零件 (OmsOrderItem)
+            OmsOrderItem item = new OmsOrderItem();
+            // 注意：此时 order.getId() 还没落库，如果用的是数据库自增ID，可以在后面的 saveOrderToDb 里统一绑定
+            item.setProductName(cartItem.getProductName()); // 👈 真实的商品名字
+            item.setProductPrice(price);                    // 👈 真实的商品价格
+            item.setProductQuantity(quantity);              // 👈 真实的商品数量
+            item.setProductId(productId);
+
+            orderItemList.add(item);
+        }
 
         // 步骤一：多重防线扣减库存
         this.reduceStockLogic(productId, quantity);
