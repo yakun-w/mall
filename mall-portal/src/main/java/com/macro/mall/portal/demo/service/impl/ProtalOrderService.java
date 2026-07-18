@@ -13,8 +13,10 @@ import com.macro.mall.portal.demo.mapper.ProductMapper;
 import com.macro.mall.portal.demo.service.IProtalOrderService;
 import com.macro.mall.portal.demo.service.IRedisService;
 import com.macro.mall.portal.domain.OrderParam;
+import jakarta.annotation.PostConstruct;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
@@ -49,6 +51,16 @@ public class ProtalOrderService implements IProtalOrderService {
     @Autowired
     private IRedisService redisService;
 
+    private DefaultRedisScript<Long> stockScript;
+
+    // 项目启动时，自动把 Lua 脚本加载到内存中，避免每次下单都去读文件
+    @PostConstruct
+    public void init() {
+        stockScript = new DefaultRedisScript<>();
+        stockScript.setLocation(new ClassPathResource("producible_stock.lua"));
+        stockScript.setResultType(Long.class);
+    }
+
     // 🚀 定义 Lua 脚本零件（放在类级别，作为常量）
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
@@ -66,63 +78,58 @@ public class ProtalOrderService implements IProtalOrderService {
 
     @Override
     @Transactional
-    public OrderResult getOrder(OrderParam orderParam){
-
-        // 1. 🔍 从入参里拿到用户勾选的购物车 ID 列表并校验
+    public OrderResult getOrder(OrderParam orderParam) {
+        // 1. 捞出购物车记录
         List<Long> cartIds = orderParam.getCartIds();
-        if (CollectionUtils.isEmpty(cartIds)) {
-            throw new RuntimeException("请选择要结算的商品");
-        }
-
-        // 2. 🔌 去数据库查出这些真实的购物车记录
         OmsCartItem1Example example = new OmsCartItem1Example();
         example.createCriteria().andIdIn(cartIds);
         List<OmsCartItem1> cartItemList = cartItem1Mapper.selectByExample(example);
-        if (CollectionUtils.isEmpty(cartItemList)) {
-            throw new RuntimeException("未找到对应的购物车商品数据");
-        }
 
-        // 3. 🪙 价格与零件容器初始化
-        BigDecimal totalAmount = BigDecimal.ZERO;                  // 订单总金额
-        List<OmsOrderItem> orderItemList = new ArrayList<>();     // 订单详情零件包
+        // 2. 内存初始化
+        BigDecimal totalAmount = BigDecimal.ZERO;
+        List<OmsOrderItem> orderItemList = new ArrayList<>();
 
-        // 4. 🌀 核心循环：遍历真实的购物车商品列表，处理库存与详情组装
+        // ==================== 【第一阶段：内存组装与试算】 ====================
+        // 💡 可以在循环里 add 订单详情，算总价。因为这只是在 Java 内存里堆积木，失败了没副作用。
         for (OmsCartItem1 cartItem : cartItemList) {
             Long productId = cartItem.getProductId();
             int quantity = cartItem.getQuantity();
-            BigDecimal price = cartItem.getPrice(); // 以购物车记录的价格为准（后续可以扩展去 PMS 查最新价）
+            BigDecimal price = cartItem.getPrice();
 
-            // 🛡️ 步骤一：多重防线扣减库存（Redis + DB 补救）
-            this.reduceStockLogic(productId, quantity);
+            // 📈 累加价格
+            totalAmount = totalAmount.add(price.multiply(new BigDecimal(quantity)));
 
-            // 📈 步骤二：累加总价格
-            BigDecimal itemTotalAmount = price.multiply(new BigDecimal(quantity));
-            totalAmount = totalAmount.add(itemTotalAmount);
-
-            // 🛠️ 步骤三：组装每一个订单详情零件 (OmsOrderItem)
+            // 🛠️ 纯内存组装零件，放心安全地 add
             OmsOrderItem item = new OmsOrderItem();
             item.setProductId(productId);
-            item.setProductName(cartItem.getProductName());
-            item.setProductPrice(price);
             item.setProductQuantity(quantity);
-            // 注意：此时 order 还没落库，没有主键 ID。我们先把它丢进集合，后面统一绑定。
+            item.setProductPrice(price);
+            item.setProductName(cartItem.getProductName());
             orderItemList.add(item);
         }
 
-        // 5. 💰 循环结束后，精细计算最终实际支付金额（扣除优惠券、积分等）
-        BigDecimal payAmount = this.calculatePayAmount(totalAmount, orderParam);
+        // ==================== 【第二阶段：原子统一扣减 Redis 库存】 ====================
+        // 💡 循环结束了，所有要扣的商品都整整齐齐在 orderItemList 里面了。
+        // 这时候我们去统一扣减 Redis！
+        try {
+            // 核心改动：把循环扣减，变成【统一交表扣减】
+            this.batchReduceRedisStock(orderItemList);
+        } catch (Exception e) {
+            // 如果批处理扣减失败（比如商品C在抢购中突然没货了），
+            // 此时 Redis 内部通过分布式锁或下文的特殊手段已经保证了“要不全成功，要不全没有”
+            throw new RuntimeException("手慢了，部分商品库存不足！");
+        }
 
-        // 6. 🏗️ 组装并持久化订单实体
-        // 6.1 创建订单主表对象 (OmsOrder)
+        // ==================== 【第三阶段：持久化与数据库事务】 ====================
+        // 💡 走到这里，说明 Redis 已经全部成功扣完了！此时开启 DB 事务，去动 MySQL。
+        BigDecimal payAmount = this.calculatePayAmount(totalAmount, orderParam);
         OmsOrder order = this.buildOrderEntity(totalAmount, payAmount, orderParam);
 
-        // 6.2 将主表和子表集合一并存入数据库（saveOrderToDb 内部会先保存 order 拿到自增 id，然后赋给每个 item 并保存）
+        // saveOrderToDb 上打着 @Transactional。如果这里面报错，MySQL 物理回滚。
         this.saveOrderToDb(order, orderItemList);
 
-        // 7. 🚀 发射延迟导弹（向 RabbitMQ 发送延迟关单消息，防止用户占座不付款）
+        // 4. 发射延迟消息，打完收工
         this.sendDelayMessage(order.getOrderSn());
-
-        // 8. 🎁 打包返回结果给前端
         return this.packageOrderResult(order, orderItemList);
     }
 
@@ -314,5 +321,32 @@ public class ProtalOrderService implements IProtalOrderService {
         result.setOrder(order);
         result.setOrderItems(Arrays.asList(item));
         return result;
+    }
+
+
+    private void batchReduceRedisStock(List<OmsOrderItem> orderItemList) {
+        // 1. 把 List 里的零件扁平化组装成 Lua 脚本需要的 ARGV 数组
+        // 格式如: ["101", "2", "102", "1"]
+        List<String> args = new ArrayList<>();
+        for (OmsOrderItem item : orderItemList) {
+            args.add(item.getProductId().toString());
+            args.add(item.getProductQuantity().toString());
+        }
+
+        // 2. 物理发射 Lua 脚本
+        // 因为我们的 Key 是动态拼接的，所以第一个参数 KEYS 列表传个空集合集合即可
+        Long result = redisTemplate.execute(stockScript, Collections.emptyList(), args.toArray());
+
+        // 3. 物理人肉研判执行结果
+        if (result == null || result == 0) {
+            // Lua 脚本内部判断库存不足，触发了 return 0，此时 Redis 内部没有发生任何数据改变！
+            throw new RuntimeException("手慢了！部分商品库存不足，请重新调整购物车");
+        }
+
+        if (result == -1) {
+            throw new RuntimeException("系统内部错误：参数格式异常");
+        }
+
+        // 如果 result == 1，代表全部扣减成功，顺畅进入下一阶段的 MySQL 事务落库！
     }
 }
