@@ -122,14 +122,22 @@ public class ProtalOrderService implements IProtalOrderService {
 
         // ==================== 【第三阶段：持久化与数据库事务】 ====================
         // 💡 走到这里，说明 Redis 已经全部成功扣完了！此时开启 DB 事务，去动 MySQL。
-        BigDecimal payAmount = this.calculatePayAmount(totalAmount, orderParam);
+        BigDecimal payAmount = this.calculatePayAmount(orderItemList, orderParam);
         OmsOrder order = this.buildOrderEntity(totalAmount, payAmount, orderParam);
 
-        // saveOrderToDb 上打着 @Transactional。如果这里面报错，MySQL 物理回滚。
-        this.saveOrderToDb(order, orderItemList);
+        // 🔌 物理改造：将原有的一条龙 saveOrderToDb，拆解为清晰的流水线步骤
+        // 1. 先保存主订单（保存完后，order.getId() 会被 MyBatis 自动回填自增ID）
+        this.saveOrder(order);
+
+        // 2. 拿着主订单零件，去批量绑定并保存商品详情零件
+        this.saveOrderItems(order, orderItemList);
+
+        // 3. 【未来扩展位】：在这里可以顺手加上订单日志的保存
+        // this.saveOrderHistory(order.getId(), "创建订单");
+
 
         // 4. 发射延迟消息，打完收工
-        this.sendDelayMessage(order.getOrderSn());
+        this.sendDelayMessage(order);
         return this.packageOrderResult(order, orderItemList);
     }
 
@@ -266,12 +274,42 @@ public class ProtalOrderService implements IProtalOrderService {
     }
 
     //价格计算
-    private BigDecimal calculatePayAmount(BigDecimal totalAmount,OrderParam orderParam) {
+    private BigDecimal calculatePayAmount(List<OmsOrderItem> orderItemList, OrderParam orderParam) {
+        // 1. 先通过原始商品明细，物理算出一个基础总价
+        BigDecimal totalAmount = BigDecimal.ZERO;
+        for (OmsOrderItem item : orderItemList) {
+            // 每一件商品单价 * 数量
+            BigDecimal itemPrice = item.getProductPrice().multiply(new BigDecimal(item.getProductQuantity()));
+            totalAmount = totalAmount.add(itemPrice);
+        }
+
         BigDecimal payAmount = totalAmount;
-        // 减去优惠券 100，减去积分 50，加上运费 10
-        return totalAmount.subtract(new BigDecimal("100"))
-                .subtract(new BigDecimal("50"))
-                .add(new BigDecimal("10"));
+
+        // 2. 🛡️ 扩展性体现一：核算优惠券 (假如传了优惠券ID)
+        if (orderParam.getCouponId() != null) {
+            // 【未来的大厂伪代码逻辑】：
+            // SmsCoupon coupon = couponMapper.selectById(orderParam.getCouponId());
+            // List<OmsOrderItem> validItems = filterValidItems(orderItemList, coupon); // 过滤出哪些商品能用这张券
+            // BigDecimal validAmount = calculateTotal(validItems); // 算出能用券的商品总额
+            // if (validAmount >= coupon.getMinPoint()) { payAmount = payAmount.subtract(coupon.getAmount()); }
+
+            // 目前为了跑通，我们先象征性减个 10 块钱测试
+            payAmount = payAmount.subtract(new BigDecimal("10.00"));
+        }
+
+        // 3. 🛡️ 扩展性体现二：积分抵扣 (如果使用了积分)
+        if (orderParam.getUseIntegration() != null && orderParam.getUseIntegration() > 0) {
+            // 假设 100 积分抵扣 1 元
+            BigDecimal integrationAmount = new BigDecimal(orderParam.getUseIntegration()).divide(new BigDecimal("100.00"));
+            payAmount = payAmount.subtract(integrationAmount);
+        }
+
+        // 4. 🚨 安全防线：防止优惠扣成负数（商品太便宜，券太大）
+        if (payAmount.compareTo(BigDecimal.ZERO) < 0) {
+            payAmount = BigDecimal.ZERO;
+        }
+
+        return payAmount;
     }
 
 
@@ -293,26 +331,26 @@ public class ProtalOrderService implements IProtalOrderService {
         return item;
     }
 
-    //数据库持久化
-    private void saveOrderToDb(OmsOrder order, List<OmsOrderItem> orderItemList) {
-        // 1. 先保存主表（MyBatis 开启 useGeneratedKeys="true" keyProperty="id" 后，会自动回填自增 ID 到 order 对象中）
-        orderMapper.insert(order);
 
-        // 2. 拿着热乎的自增订单 ID，物理绑定到每一个商品详情零件上
-        for (OmsOrderItem item : orderItemList) {
-            item.setOrderId(order.getId());
-            item.setOrderSn(order.getOrderSn());
-            orderItemMapper.insert(item); // 逐条插入或改写成 MyBatis 批量插入 batchInsert
-        }
-    }
 
-    //MQ 消息车间
-    private void sendDelayMessage(String orderSn) {
-        rabbitTemplate.convertAndSend(
-                "order.exchange",
-                "order.create",
-                orderSn
-        );
+    /**
+     * 职责：负责为当前订单发射一枚延迟关单消息导弹
+     */
+    private void sendDelayMessage(OmsOrder order) {
+        // 1. 物理提取当前需要的订单号（兼容老业务）
+        String orderSn = order.getOrderSn();
+
+        // 2. 🛡️ 扩展性体现：未来如果 MQ 升级，需要多维度参数，直接在这里 get，完全不用改方法定义！
+        // Long orderId = order.getId();
+        // Long memberId = order.getMemberId();
+        // Date createTime = order.getCreateTime();
+
+        // 3. 模拟大厂发送 MQ 消息的逻辑
+        // 我们可以把整个 order 对象序列化成 JSON 字符串，作为高含金量的消息体发射出去
+        // String messageBody = JSON.toJSONString(order);
+        // amqpTemplate.convertAndSend("order.delay.exchange", "order.delay.routingKey", messageBody, ...);
+
+        System.out.println("成功为订单 [" + orderSn + "] 发射延迟关单消息，未来可无缝提取其他字段");
     }
 
     //结果包装
@@ -348,5 +386,27 @@ public class ProtalOrderService implements IProtalOrderService {
         }
 
         // 如果 result == 1，代表全部扣减成功，顺畅进入下一阶段的 MySQL 事务落库！
+    }
+
+    /**
+     * 职责 1：纯粹负责订单主表（OmsOrder）的落库
+     */
+    private void saveOrder(OmsOrder order) {
+        // 物理插入主表。注意：MyBatis 对应的 XML 必须配置 useGeneratedKeys="true" keyProperty="id"
+        orderMapper.insert(order);
+    }
+
+    /**
+     * 职责 2：纯粹负责订单商品详情集合（OmsOrderItem）的绑定与落库
+     */
+    private void saveOrderItems(OmsOrder order, List<OmsOrderItem> orderItemList) {
+        // 循环遍历零件包，人肉绑定刚刚由 saveOrder() 生成的自增主键 ID 和订单号
+        for (OmsOrderItem item : orderItemList) {
+            item.setOrderId(order.getId());    // 🔗 灵魂绑定：把主表的自增 ID 赋给子表的外键
+            item.setOrderSn(order.getOrderSn());
+
+            // 单条插入（未来可以在这里优化为 mapper.insertList(orderItemList) 批量插入）
+            orderItemMapper.insert(item);
+        }
     }
 }
