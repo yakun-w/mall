@@ -28,4 +28,13 @@ public class OmsOrderItem {
 
     @Schema(title = "购买数量")
     private Integer productQuantity;
+
+    @Schema(title = "实际金额")
+    private BigDecimal realAmount;
+
+    @Schema(title = "赠送积分")
+    private Integer giftIntegration;
+
+    @Schema(title = "赠送成长值")
+    private Integer giftGrowth;
 }

@@ -13,6 +13,7 @@ spring:
 mybatis:
   mapper-locations:
     - classpath:dao/*.xml
+    - classpath:demo/mapper/*.xml
     - classpath*:com/**/mapper/*.xml
 
 jwt:
